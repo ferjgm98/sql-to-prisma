@@ -116,6 +116,19 @@ datasource db {
     }
 
     const attributes: string[] = [];
+
+    // Add index attributes
+    if (table.indexes && table.indexes.length > 0) {
+      for (const index of table.indexes) {
+        const indexColumns = index.columns.map(col => this.toCamelCase(col));
+        if (index.unique) {
+          attributes.push(`@@unique([${indexColumns.join(', ')}])`);
+        } else {
+          attributes.push(`@@index([${indexColumns.join(', ')}])`);
+        }
+      }
+    }
+
     if (table.name !== modelName.toLowerCase()) {
       attributes.push(`@@map("${table.name}")`);
     }
@@ -124,6 +137,7 @@ datasource db {
       name: modelName,
       fields,
       attributes,
+      comment: table.comment,
     };
   }
 
@@ -220,6 +234,7 @@ datasource db {
       attributes,
       isOptional: column.nullable && !column.isPrimaryKey,
       isArray: false,
+      comment: column.comment,
     };
   }
 
@@ -582,7 +597,14 @@ datasource db {
   }
 
   private static formatModel(model: PrismaModel): string {
-    let result = `model ${model.name} {\n`;
+    let result = "";
+
+    // Add model comment if present
+    if (model.comment) {
+      result += `/// ${model.comment}\n`;
+    }
+
+    result += `model ${model.name} {\n`;
 
     // Find the longest field name for alignment
     const maxFieldLength = Math.max(
@@ -609,6 +631,11 @@ datasource db {
 
     // Add scalar fields first
     for (const field of scalarFields) {
+      // Add field comment if present
+      if (field.comment) {
+        result += `  /// ${field.comment}\n`;
+      }
+
       const fieldName = field.name.padEnd(maxFieldLength);
       const fieldType = (
         field.type +
@@ -628,6 +655,11 @@ datasource db {
     if (relationFields.length > 0) {
       result += "\n  // Relations\n";
       for (const field of relationFields) {
+        // Add field comment if present
+        if (field.comment) {
+          result += `  /// ${field.comment}\n`;
+        }
+
         const fieldName = field.name.padEnd(maxFieldLength);
         const fieldType = (
           field.type +
