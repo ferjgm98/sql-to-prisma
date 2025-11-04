@@ -232,13 +232,19 @@ datasource db {
       return null;
 
     const referencedModelName = this.toPascalCase(constraint.referencedTable);
+    const fkColumn = constraint.columns[0];
 
     // Generate field name from FK column, ensuring it's unique in the model
     const baseFieldName = this.extractRelationFieldName(
-      constraint.columns[0],
+      fkColumn,
       constraint.referencedTable
     );
-    const fieldName = this.ensureUniqueFieldName(baseFieldName, model);
+    const fieldName = this.ensureUniqueFieldName(
+      baseFieldName,
+      model,
+      fkColumn,
+      table.name
+    );
 
     // Support composite foreign keys
     const foreignKeyFields = constraint.columns.map((col) =>
@@ -270,9 +276,10 @@ datasource db {
     if (!constraint.referencedTable || !constraint.columns.length) return null;
 
     const sourceModelName = this.toPascalCase(table.name);
+    const fkColumn = constraint.columns[0];
 
     // Extract meaningful context from FK column for better naming
-    const fkContext = this.extractForeignKeyContext(constraint.columns[0]);
+    const fkContext = this.extractForeignKeyContext(fkColumn);
     const baseBackName = this.pluralize(this.toCamelCase(table.name));
 
     // Always include context if it's meaningful (not just "id" or table name)
@@ -281,7 +288,12 @@ datasource db {
       : baseBackName;
 
     // Ensure the field name is unique in the referenced model
-    const fieldName = this.ensureUniqueFieldName(baseName, referencedModel);
+    const fieldName = this.ensureUniqueFieldName(
+      baseName,
+      referencedModel,
+      fkColumn,
+      table.name
+    );
 
     return {
       name: fieldName,
@@ -349,18 +361,67 @@ datasource db {
   }
 
   /**
-   * Ensures a field name is unique within a model by adding numeric suffixes if needed.
+   * Ensures a field name is unique within a model by using progressively more context.
+   * Instead of numeric suffixes (like createdBy2), we use more of the FK column name
+   * for meaningful disambiguation.
+   *
+   * Disambiguation strategies (in order of preference):
+   * 1. Base name from FK column (e.g., "author" from "author_id")
+   * 2. Full FK column context (e.g., "createdByUser" from "created_by_user_id")
+   * 3. Source table prefix (e.g., "postsAuthor" for back-relations)
+   * 4. Full column name including _id (e.g., "authorId")
+   * 5. Source + column (e.g., "postsAuthorId") - very rare
+   * 6. Numeric suffix as absolute last resort (should never happen in practice)
+   *
+   * Examples:
+   * - author_id → "author"
+   * - created_by_user_id → "createdByUser" (full context)
+   * - updated_by_admin_id → "updatedByAdmin" (full context)
    */
   private static ensureUniqueFieldName(
     baseName: string,
-    model: PrismaModel
+    model: PrismaModel,
+    fkColumn: string,
+    sourceTable: string
   ): string {
     const existingNames = new Set(model.fields.map((f) => f.name));
 
-    let uniqueName = baseName;
+    // If base name is unique, use it
+    if (!existingNames.has(baseName)) {
+      return baseName;
+    }
+
+    // Strategy 1: Use the full FK column context (without _id suffix)
+    const fullContext = this.toCamelCase(fkColumn.replace(/_id$/i, ""));
+    if (fullContext !== baseName && !existingNames.has(fullContext)) {
+      return fullContext;
+    }
+
+    // Strategy 2: Prefix with source table name for back-relations
+    // e.g., if User has collision, try "postsAuthor" instead of just "author"
+    const withSourcePrefix = this.toCamelCase(sourceTable) + this.toPascalCase(baseName);
+    if (!existingNames.has(withSourcePrefix)) {
+      return withSourcePrefix;
+    }
+
+    // Strategy 3: Use full FK column name as-is (keeping underscores converted to camelCase)
+    const fullColumnName = this.toCamelCase(fkColumn);
+    if (!existingNames.has(fullColumnName)) {
+      return fullColumnName;
+    }
+
+    // Strategy 4: Last resort - combine source table + full column name
+    // This should be extremely rare
+    const lastResort = this.toCamelCase(sourceTable + "_" + fkColumn.replace(/_id$/i, ""));
+    if (!existingNames.has(lastResort)) {
+      return lastResort;
+    }
+
+    // If even this collides, add minimal numeric suffix (should never happen in practice)
     let counter = 2;
+    let uniqueName = `${lastResort}${counter}`;
     while (existingNames.has(uniqueName)) {
-      uniqueName = `${baseName}${counter}`;
+      uniqueName = `${lastResort}${counter}`;
       counter++;
     }
 
@@ -410,13 +471,19 @@ datasource db {
 
   private static extractForeignKeyContext(fkColumn: string): string {
     // Extract meaningful context from FK column name for disambiguation
-    // Prefer the last two tokens to keep phrases like created_by, assigned_to
+    // Remove _id suffix first
     const cleaned = fkColumn.replace(/_id$/i, "");
     const parts = cleaned.split("_").filter(Boolean);
-    if (parts.length >= 2) {
-      return `${parts[parts.length - 2]}_${parts[parts.length - 1]}`;
+
+    // If single part, return it
+    if (parts.length === 1) {
+      return parts[0];
     }
-    return parts[0] || cleaned;
+
+    // For multi-part columns, return all parts joined with underscore
+    // This preserves full context like "created_by_user" or "assigned_to_manager"
+    // The caller can decide how much to use
+    return parts.join("_");
   }
 
   private static isRelationOptional(
