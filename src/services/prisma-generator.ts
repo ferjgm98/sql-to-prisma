@@ -56,11 +56,14 @@ datasource db {
 
       for (const constraint of table.constraints) {
         if (constraint.type === "FOREIGN KEY" && constraint.referencedTable) {
+          // Select the best column for naming (handles composite FKs intelligently)
+          const namingColumn = this.selectNamingColumn(constraint);
+
           // Generate a descriptive, unique relation name for this FK constraint
           const relationName = this.generateDescriptiveRelationName(
             table.name,
             constraint.referencedTable,
-            constraint.columns[0],
+            namingColumn,
             usedRelationNames
           );
 
@@ -69,7 +72,8 @@ datasource db {
             constraint,
             table,
             relationName,
-            model
+            model,
+            namingColumn
           );
           if (relationField) {
             model.fields.push(relationField);
@@ -84,7 +88,8 @@ datasource db {
               constraint,
               table,
               relationName,
-              referencedModel
+              referencedModel,
+              namingColumn
             );
             if (backRelationField) {
               referencedModel.fields.push(backRelationField);
@@ -222,7 +227,8 @@ datasource db {
     constraint: SQLTable["constraints"][0],
     table: SQLTable,
     relationName: string,
-    model: PrismaModel
+    model: PrismaModel,
+    namingColumn: string
   ): PrismaField | null {
     if (
       !constraint.referencedTable ||
@@ -232,17 +238,16 @@ datasource db {
       return null;
 
     const referencedModelName = this.toPascalCase(constraint.referencedTable);
-    const fkColumn = constraint.columns[0];
 
-    // Generate field name from FK column, ensuring it's unique in the model
+    // Generate field name from the selected naming column (not always columns[0])
     const baseFieldName = this.extractRelationFieldName(
-      fkColumn,
+      namingColumn,
       constraint.referencedTable
     );
     const fieldName = this.ensureUniqueFieldName(
       baseFieldName,
       model,
-      fkColumn,
+      namingColumn,
       table.name
     );
 
@@ -271,15 +276,15 @@ datasource db {
     constraint: SQLTable["constraints"][0],
     table: SQLTable,
     relationName: string,
-    referencedModel: PrismaModel
+    referencedModel: PrismaModel,
+    namingColumn: string
   ): PrismaField | null {
     if (!constraint.referencedTable || !constraint.columns.length) return null;
 
     const sourceModelName = this.toPascalCase(table.name);
-    const fkColumn = constraint.columns[0];
 
-    // Extract meaningful context from FK column for better naming
-    const fkContext = this.extractForeignKeyContext(fkColumn);
+    // Extract meaningful context from the selected naming column (not always columns[0])
+    const fkContext = this.extractForeignKeyContext(namingColumn);
     const baseBackName = this.pluralize(this.toCamelCase(table.name));
 
     // Always include context if it's meaningful (not just "id" or table name)
@@ -291,7 +296,7 @@ datasource db {
     const fieldName = this.ensureUniqueFieldName(
       baseName,
       referencedModel,
-      fkColumn,
+      namingColumn,
       table.name
     );
 
@@ -319,6 +324,35 @@ datasource db {
     if (lower.endsWith("y") && !/[aeiou]y$/.test(lower))
       return word.slice(0, -1) + "ies";
     return word + "s";
+  }
+
+  /**
+   * Selects the best column for naming from a composite FK.
+   * For composite FKs like (tenant_id, user_id), we want to use the business key (user_id)
+   * rather than the scoping column (tenant_id).
+   *
+   * Strategy:
+   * 1. If any referenced column is 'id' (primary key), use the corresponding FK column
+   * 2. Otherwise, use the last column as fallback (business key is usually last)
+   * 3. For single-column FKs, this returns constraint.columns[0] unchanged
+   */
+  private static selectNamingColumn(constraint: SQLTable["constraints"][0]): string {
+    if (!constraint.referencedColumns || constraint.columns.length === 1) {
+      return constraint.columns[0];
+    }
+
+    // Find the index where referencedColumns contains 'id'
+    const idIndex = constraint.referencedColumns.findIndex(
+      (col) => col.toLowerCase() === "id"
+    );
+
+    if (idIndex !== -1 && idIndex < constraint.columns.length) {
+      // Use the FK column that references the primary key
+      return constraint.columns[idIndex];
+    }
+
+    // Fallback: use the last column (business key typically comes after scoping columns)
+    return constraint.columns[constraint.columns.length - 1];
   }
 
   /**

@@ -8,6 +8,7 @@ This document explains how the SQL to Prisma converter generates relation names 
 2. **Use full FK column context**: Extract all semantic meaning from foreign key column names
 3. **Progressive disambiguation**: Use increasingly specific context when collisions occur
 4. **Consistency**: Same naming logic for both forward and back relations
+5. **Smart composite FK handling**: For composite FKs, use the business key for naming (not scoping columns)
 
 ## Field Naming Strategy
 
@@ -182,6 +183,69 @@ model Manager {
 }
 ```
 
+## Composite Foreign Keys
+
+For multi-tenant or scoped schemas with composite foreign keys, the converter intelligently selects the business key for naming rather than the scoping column.
+
+### Naming Column Selection Strategy
+
+1. **If any referenced column is `id`** (primary key), use the corresponding FK column
+2. **Otherwise**, use the last column (business keys typically come after scoping columns)
+3. **For single-column FKs**, this simply uses that column
+
+### Example: Multi-Tenant Schema
+
+```sql
+CREATE TABLE tenants (
+  id SERIAL PRIMARY KEY,
+  name VARCHAR(255)
+);
+
+CREATE TABLE users (
+  tenant_id INTEGER NOT NULL,
+  id SERIAL NOT NULL,
+  name VARCHAR(255),
+  PRIMARY KEY (tenant_id, id),
+  FOREIGN KEY (tenant_id) REFERENCES tenants(id)
+);
+
+CREATE TABLE posts (
+  tenant_id INTEGER NOT NULL,
+  id SERIAL NOT NULL,
+  author_id INTEGER NOT NULL,
+  title TEXT,
+  PRIMARY KEY (tenant_id, id),
+  FOREIGN KEY (tenant_id) REFERENCES tenants(id),
+  -- Composite FK: (tenant_id, author_id) → users(tenant_id, id)
+  FOREIGN KEY (tenant_id, author_id) REFERENCES users(tenant_id, id)
+);
+```
+
+**Without smart column selection** (BAD):
+```prisma
+// Would use tenant_id for naming - wrong! ❌
+tenant User @relation("PostToUser_Tenant", fields: [tenantId, authorId], ...)
+```
+
+**With smart column selection** (GOOD):
+```prisma
+// Uses author_id for naming - correct! ✓
+author User @relation("PostToUser_Author", fields: [tenantId, authorId], references: [tenantId, id])
+
+// Back-relation also uses author context
+postsAsAuthor Post[] @relation("PostToUser_Author")
+```
+
+### How It Works
+
+The `selectNamingColumn()` method:
+1. Checks if any `referencedColumns` is `'id'` (the primary key)
+2. If found, uses the corresponding column from `constraint.columns`
+3. For `(tenant_id, author_id) → (tenant_id, id)`:
+   - Referenced column `id` is at index 1
+   - Returns `author_id` (the column at index 1)
+4. This gives us the business key (`author_id`) instead of the scoping key (`tenant_id`)
+
 ## Benefits
 
 1. **No meaningless numeric suffixes**: All names are semantically meaningful
@@ -189,3 +253,4 @@ model Manager {
 3. **Maintainable**: Easy to understand relationships without referring to SQL
 4. **Predictable**: Consistent naming across the entire schema
 5. **Collision-safe**: Multiple strategies ensure unique names without ambiguity
+6. **Multi-tenant friendly**: Composite FKs use business keys for naming, not scoping columns
