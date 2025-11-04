@@ -149,9 +149,12 @@ export class SQLValidator {
             "BYTEA",
           ];
 
+          // Extract base type (strip array brackets [] for validation)
+          const baseType = column.type.replace(/\[\]$/, "").toUpperCase();
+
           if (
             !column.isEnum &&
-            !supportedTypes.includes(column.type.toUpperCase())
+            !supportedTypes.includes(baseType)
           ) {
             diagnostics.push({
               severity: "warning",
