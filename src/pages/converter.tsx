@@ -10,6 +10,8 @@ import {
 import { useToast } from "@/hooks/use-toast";
 import { SQLParser } from "@/services/sql-parser";
 import { PrismaGenerator } from "@/services/prisma-generator";
+import { SQLValidator } from "@/services/sql-validator";
+import { PrismaValidator } from "@/services/prisma-validator";
 import {
   Database,
   Layers,
@@ -308,9 +310,11 @@ export default function Converter() {
   const isModifierPressedRef = useRef(false);
   const sqlInputRef = useRef(sqlInput);
   const currentDecorationsRef = useRef<string[]>([]);
+  const monacoRef = useRef<any>(null);
 
   // Initialize Monaco with language support and themes
-  const handleEditorWillMount = (_monaco: any) => {
+  const handleEditorWillMount = (monaco: any) => {
+    monacoRef.current = monaco;
     registerLanguagesAndThemes();
   };
 
@@ -375,9 +379,83 @@ export default function Converter() {
     return monacoWord;
   };
 
+  // Validate SQL and show markers in Monaco Editor
+  const validateSQL = useCallback((sql: string, editor: any, monaco: any) => {
+    if (!editor || !monaco) return;
+
+    const diagnostics = SQLValidator.validate(sql);
+    const model = editor.getModel();
+    if (!model) return;
+
+    // Convert diagnostics to Monaco markers
+    const markers = diagnostics.map((diag) => ({
+      severity:
+        diag.severity === "error"
+          ? monaco.MarkerSeverity.Error
+          : diag.severity === "warning"
+          ? monaco.MarkerSeverity.Warning
+          : monaco.MarkerSeverity.Info,
+      message: diag.message,
+      startLineNumber: diag.line,
+      startColumn: diag.column,
+      endLineNumber: diag.endLine,
+      endColumn: diag.endColumn,
+    }));
+
+    // Set markers on the model
+    monaco.editor.setModelMarkers(model, "sql-validator", markers);
+  }, []);
+
+  // Validate Prisma and show markers in Monaco Editor
+  const validatePrisma = useCallback(
+    (schema: string, editor: any, monaco: any) => {
+      if (!editor || !monaco) return;
+
+      const diagnostics = PrismaValidator.validate(schema);
+      const model = editor.getModel();
+      if (!model) return;
+
+      // Convert diagnostics to Monaco markers
+      const markers = diagnostics.map((diag) => ({
+        severity:
+          diag.severity === "error"
+            ? monaco.MarkerSeverity.Error
+            : diag.severity === "warning"
+            ? monaco.MarkerSeverity.Warning
+            : monaco.MarkerSeverity.Info,
+        message: diag.message,
+        startLineNumber: diag.line,
+        startColumn: diag.column,
+        endLineNumber: diag.endLine,
+        endColumn: diag.endColumn,
+      }));
+
+      // Set markers on the model
+      monaco.editor.setModelMarkers(model, "prisma-validator", markers);
+    },
+    []
+  );
+
+  // Debounced SQL validation
+  const debouncedValidateSQL = useCallback(
+    debounce((sql: string, editor: any, monaco: any) => {
+      validateSQL(sql, editor, monaco);
+    }, 500),
+    [validateSQL]
+  );
+
+  // Debounced Prisma validation
+  const debouncedValidatePrisma = useCallback(
+    debounce((schema: string, editor: any, monaco: any) => {
+      validatePrisma(schema, editor, monaco);
+    }, 500),
+    [validatePrisma]
+  );
+
   // Handle SQL editor mount
   const handleSqlEditorMount = (editor: any, monaco: any) => {
     sqlEditorRef.current = editor;
+    monacoRef.current = monaco;
 
     // Configure word pattern for SQL to include underscores
     monaco.languages.setLanguageConfiguration("sql", {
@@ -465,6 +543,15 @@ export default function Converter() {
         }
       }
     });
+
+    // Validate SQL on mount
+    validateSQL(sqlInput, editor, monaco);
+
+    // Add content change listener for validation
+    editor.onDidChangeModelContent(() => {
+      const content = editor.getModel()?.getValue() || "";
+      debouncedValidateSQL(content, editor, monaco);
+    });
   };
 
   // Extract navigable entities (models and enums) from Prisma content
@@ -551,8 +638,9 @@ export default function Converter() {
   };
 
   // Handle Prisma editor mount
-  const handlePrismaEditorMount = (editor: any, _monaco: any) => {
+  const handlePrismaEditorMount = (editor: any, monaco: any) => {
     prismaEditorRef.current = editor;
+    monacoRef.current = monaco;
 
     // Handle mouse move for hover effects
     editor.onMouseMove((e: any) => {
@@ -698,6 +786,12 @@ export default function Converter() {
         }
       }
     });
+
+    // Validate Prisma schema on mount if there's content
+    const currentContent = editor.getModel()?.getValue() || "";
+    if (currentContent && currentContent !== defaultPrismaContent) {
+      validatePrisma(currentContent, editor, monaco);
+    }
   };
 
   const convertSQLToPrisma = useCallback(
@@ -729,6 +823,18 @@ export default function Converter() {
 
         setPrismaOutput(prismaSchema);
         setConversionStatus("ready");
+
+        // Validate the generated Prisma schema
+        if (prismaEditorRef.current && monacoRef.current) {
+          // Use a small delay to ensure the editor has updated with new content
+          setTimeout(() => {
+            validatePrisma(
+              prismaSchema,
+              prismaEditorRef.current,
+              monacoRef.current
+            );
+          }, 100);
+        }
 
         // Count number of models and enums in the output
         const modelCount = (prismaSchema.match(/^model\s+\w+/gm) || []).length;
