@@ -40,8 +40,7 @@ datasource db {
     enums: PrismaEnum[] = []
   ): PrismaModel[] {
     const models: PrismaModel[] = [];
-    const relationCounter = new Map<string, number>();
-    const fieldNameCounters = new Map<string, Map<string, number>>();
+    const usedRelationNames = new Set<string>();
 
     // First pass: create basic models with scalar fields only
     for (const table of tables) {
@@ -57,12 +56,12 @@ datasource db {
 
       for (const constraint of table.constraints) {
         if (constraint.type === "FOREIGN KEY" && constraint.referencedTable) {
-          // Generate a single relation name for this FK constraint
-          const relationName = this.generateUniqueRelationName(
+          // Generate a descriptive, unique relation name for this FK constraint
+          const relationName = this.generateDescriptiveRelationName(
             table.name,
             constraint.referencedTable,
             constraint.columns[0],
-            relationCounter
+            usedRelationNames
           );
 
           // Add forward relation to current model
@@ -70,24 +69,24 @@ datasource db {
             constraint,
             table,
             relationName,
-            fieldNameCounters
+            model
           );
           if (relationField) {
             model.fields.push(relationField);
           }
 
           // Add back-relation to referenced model using the same relation name
-          const backRelationField = this.createBackRelationField(
-            constraint,
-            table,
-            relationName,
-            fieldNameCounters
-          );
-          if (backRelationField) {
-            const referencedModel = models.find(
-              (m) => m.name === this.toPascalCase(constraint.referencedTable!)
-            )!;
-            if (referencedModel) {
+          const referencedModel = models.find(
+            (m) => m.name === this.toPascalCase(constraint.referencedTable!)
+          )!;
+          if (referencedModel) {
+            const backRelationField = this.createBackRelationField(
+              constraint,
+              table,
+              relationName,
+              referencedModel
+            );
+            if (backRelationField) {
               referencedModel.fields.push(backRelationField);
             }
           }
@@ -223,7 +222,7 @@ datasource db {
     constraint: SQLTable["constraints"][0],
     table: SQLTable,
     relationName: string,
-    fieldNameCounters: Map<string, Map<string, number>>
+    model: PrismaModel
   ): PrismaField | null {
     if (
       !constraint.referencedTable ||
@@ -233,13 +232,13 @@ datasource db {
       return null;
 
     const referencedModelName = this.toPascalCase(constraint.referencedTable);
-    const fieldName = this.generateUniqueFieldName(
-      table.name,
-      constraint.referencedTable,
-      constraint.columns,
-      fieldNameCounters,
-      false
+
+    // Generate field name from FK column, ensuring it's unique in the model
+    const baseFieldName = this.extractRelationFieldName(
+      constraint.columns[0],
+      constraint.referencedTable
     );
+    const fieldName = this.ensureUniqueFieldName(baseFieldName, model);
 
     // Support composite foreign keys
     const foreignKeyFields = constraint.columns.map((col) =>
@@ -266,26 +265,23 @@ datasource db {
     constraint: SQLTable["constraints"][0],
     table: SQLTable,
     relationName: string,
-    fieldNameCounters: Map<string, Map<string, number>>
+    referencedModel: PrismaModel
   ): PrismaField | null {
     if (!constraint.referencedTable || !constraint.columns.length) return null;
 
     const sourceModelName = this.toPascalCase(table.name);
-    // If there are multiple FKs from the same source table to the same referenced table,
-    // disambiguate the back-relation name using the FK column context, e.g. postsAsAuthor, postsAsCoauthor
-    const fkCountToSameTarget = table.constraints.filter(
-      (c) =>
-        c.type === "FOREIGN KEY" &&
-        c.referencedTable === constraint.referencedTable
-    ).length;
 
-    const baseBackName = this.pluralize(this.toCamelCase(table.name));
-    const needsContext = fkCountToSameTarget > 1;
+    // Extract meaningful context from FK column for better naming
     const fkContext = this.extractForeignKeyContext(constraint.columns[0]);
-    // Use clearer suffix without the "As" infix, e.g. ticketsCreatedBy, ticketsAssignedTo
-    const fieldName = needsContext
+    const baseBackName = this.pluralize(this.toCamelCase(table.name));
+
+    // Always include context if it's meaningful (not just "id" or table name)
+    const baseName = this.shouldIncludeContext(fkContext, table.name)
       ? `${baseBackName}${this.toPascalCase(fkContext)}`
       : baseBackName;
+
+    // Ensure the field name is unique in the referenced model
+    const fieldName = this.ensureUniqueFieldName(baseName, referencedModel);
 
     return {
       name: fieldName,
@@ -313,47 +309,82 @@ datasource db {
     return word + "s";
   }
 
-  private static generateUniqueRelationName(
+  /**
+   * Generates a descriptive, unique relation name based on the FK column context.
+   * Always includes semantic context for clarity and consistency.
+   */
+  private static generateDescriptiveRelationName(
     fromTable: string,
     toTable: string,
     fkColumn: string,
-    relationCounter: Map<string, number>
+    usedNames: Set<string>
   ): string {
-    // Simple base relation name
-    const baseName = `${this.toPascalCase(fromTable)}To${this.toPascalCase(
-      toTable
-    )}`;
+    const fromTablePascal = this.toPascalCase(fromTable);
+    const toTablePascal = this.toPascalCase(toTable);
 
-    // Track occurrences of this relation pattern
-    const count = relationCounter.get(baseName) || 0;
-    relationCounter.set(baseName, count + 1);
+    // Extract meaningful context from FK column
+    const fkContext = this.extractForeignKeyContext(fkColumn);
+    const contextPascal = this.toPascalCase(fkContext);
 
-    // Only add suffix for multiple relations between same tables
-    if (count > 0) {
-      // Use FK column context for disambiguation
-      const fkContext = this.extractForeignKeyContext(fkColumn);
-      return `${baseName}_${this.toPascalCase(fkContext)}`;
+    // Generate base name with context for clarity
+    let baseName: string;
+    if (this.shouldIncludeContext(fkContext, fromTable)) {
+      // Use context if it's meaningful (e.g., "PostToUser_Author", "PostToUser_Editor")
+      baseName = `${fromTablePascal}To${toTablePascal}_${contextPascal}`;
+    } else {
+      // Fallback to simple name if context is not meaningful
+      baseName = `${fromTablePascal}To${toTablePascal}`;
     }
 
-    return baseName;
+    // Ensure uniqueness by adding numeric suffix if needed
+    let uniqueName = baseName;
+    let counter = 2;
+    while (usedNames.has(uniqueName)) {
+      uniqueName = `${baseName}_${counter}`;
+      counter++;
+    }
+
+    usedNames.add(uniqueName);
+    return uniqueName;
   }
 
-  private static generateUniqueFieldName(
-    sourceTable: string,
-    targetTable: string,
-    columns: string[],
-    _fieldNameCounters: Map<string, Map<string, number>>,
-    isBackRelation: boolean
+  /**
+   * Ensures a field name is unique within a model by adding numeric suffixes if needed.
+   */
+  private static ensureUniqueFieldName(
+    baseName: string,
+    model: PrismaModel
   ): string {
-    const fkColumn = columns[0]; // Primary FK column for naming
+    const existingNames = new Set(model.fields.map((f) => f.name));
 
-    if (isBackRelation) {
-      // Kept for compatibility; actual back-relation naming is handled in createBackRelationField
-      return this.pluralize(this.toCamelCase(sourceTable));
-    } else {
-      // For forward relations (many-to-one), extract meaningful name from FK column
-      return this.extractRelationFieldName(fkColumn, targetTable);
+    let uniqueName = baseName;
+    let counter = 2;
+    while (existingNames.has(uniqueName)) {
+      uniqueName = `${baseName}${counter}`;
+      counter++;
     }
+
+    return uniqueName;
+  }
+
+  /**
+   * Determines if the FK context should be included in naming.
+   * Returns true if the context is meaningful (not just "id" or matching the table name).
+   */
+  private static shouldIncludeContext(
+    fkContext: string,
+    tableName: string
+  ): boolean {
+    const lowerContext = fkContext.toLowerCase();
+    const lowerTable = tableName.toLowerCase();
+
+    // Don't include context if it's just "id" or matches the table name
+    if (lowerContext === "id" || lowerContext === lowerTable) {
+      return false;
+    }
+
+    // Include context if it's meaningful
+    return true;
   }
 
   private static extractRelationFieldName(
