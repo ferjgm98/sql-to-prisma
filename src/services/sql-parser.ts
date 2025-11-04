@@ -1,10 +1,10 @@
-import { SQLTable, SQLColumn, SQLConstraint, SQLEnum, SQLParseResult } from "@/types";
+import { SQLTable, SQLColumn, SQLConstraint, SQLEnum, SQLParseResult, SQLIndex } from "@/types";
 
 export class SQLParser {
   static parseSQL(sql: string): SQLParseResult {
     const tables: SQLTable[] = [];
     const enums: SQLEnum[] = [];
-    
+
     // Clean up the SQL - remove comments and normalize whitespace
     const cleanedSQL = sql
       .replace(/--.*$/gm, '') // Remove line comments
@@ -19,7 +19,7 @@ export class SQLParser {
     for (const statement of statements) {
       const trimmed = statement.trim();
       const upperTrimmed = trimmed.toUpperCase();
-      
+
       if (upperTrimmed.startsWith('CREATE TYPE') && upperTrimmed.includes('AS ENUM')) {
         const enumDef = this.parseCreateEnum(trimmed);
         if (enumDef) {
@@ -32,7 +32,7 @@ export class SQLParser {
     for (const statement of statements) {
       const trimmed = statement.trim();
       const upperTrimmed = trimmed.toUpperCase();
-      
+
       if (upperTrimmed.startsWith('CREATE TABLE')) {
         const table = this.parseCreateTable(trimmed, enums);
         if (table) {
@@ -45,9 +45,29 @@ export class SQLParser {
     for (const statement of statements) {
       const trimmed = statement.trim();
       const upperTrimmed = trimmed.toUpperCase();
-      
+
       if (upperTrimmed.startsWith('ALTER TABLE') && (upperTrimmed.includes('ADD FOREIGN KEY') || upperTrimmed.includes('ADD CONSTRAINT'))) {
         this.parseAlterTableForeignKey(trimmed, tables);
+      }
+    }
+
+    // Fourth pass: parse CREATE INDEX statements
+    for (const statement of statements) {
+      const trimmed = statement.trim();
+      const upperTrimmed = trimmed.toUpperCase();
+
+      if (upperTrimmed.startsWith('CREATE INDEX') || upperTrimmed.startsWith('CREATE UNIQUE INDEX')) {
+        this.parseCreateIndex(trimmed, tables);
+      }
+    }
+
+    // Fifth pass: parse COMMENT ON statements
+    for (const statement of statements) {
+      const trimmed = statement.trim();
+      const upperTrimmed = trimmed.toUpperCase();
+
+      if (upperTrimmed.startsWith('COMMENT ON')) {
+        this.parseComment(trimmed, tables);
       }
     }
 
@@ -92,7 +112,9 @@ export class SQLParser {
       return {
         name: tableName,
         columns,
-        constraints
+        constraints,
+        indexes: [],
+        comment: undefined
       };
     } catch (error) {
       console.error('Error parsing CREATE TABLE statement:', error);
@@ -320,7 +342,7 @@ export class SQLParser {
       const fkMatch = statement.match(
         /ALTER\s+TABLE\s+(?:"([^"]+)"|(\w+))\s+ADD\s+(?:CONSTRAINT\s+(?:"[^"]+"|[\w]+)\s+)?FOREIGN\s+KEY\s*\(\s*(?:"([^"]+)"|(\w+))\s*\)\s+REFERENCES\s+(?:"([^"]+)"|(\w+))\s*\(\s*(?:"([^"]+)"|(\w+))\s*\)/i
       );
-      
+
       if (!fkMatch) return;
 
       const alterTableName = fkMatch[1] || fkMatch[2]; // the table being altered (contains the FK column)
@@ -337,11 +359,91 @@ export class SQLParser {
           referencedTable: referencedTableName,
           referencedColumns: [referencedColumn]
         };
-        
+
         foreignKeyTable.constraints.push(constraint);
       }
     } catch (error) {
       console.error('Error parsing ALTER TABLE FOREIGN KEY:', error);
+    }
+  }
+
+  private static parseCreateIndex(statement: string, tables: SQLTable[]): void {
+    try {
+      // Parse: CREATE [UNIQUE] INDEX [index_name] ON table_name [USING method] (column1, column2, ...)
+      const indexMatch = statement.match(
+        /CREATE\s+(UNIQUE\s+)?INDEX\s+(?:(?:"([^"]+)"|(\w+))\s+)?ON\s+(?:"([^"]+)"|(\w+))(?:\s+USING\s+(\w+))?\s*\(\s*([^)]+)\s*\)/i
+      );
+
+      if (!indexMatch) return;
+
+      const isUnique = !!indexMatch[1];
+      const indexName = indexMatch[2] || indexMatch[3]; // optional index name
+      const tableName = indexMatch[4] || indexMatch[5]; // table name
+      const using = indexMatch[6]; // USING method (BTREE, HASH, etc.)
+      const columnsStr = indexMatch[7]; // column list
+
+      // Parse columns (handle quoted identifiers)
+      const columns = columnsStr
+        .split(',')
+        .map(col => {
+          const trimmed = col.trim();
+          // Remove DESC/ASC keywords if present
+          const cleanedCol = trimmed.replace(/\s+(DESC|ASC)$/i, '');
+          return this.parseIdentifier(cleanedCol);
+        })
+        .filter(col => col.length > 0);
+
+      const table = tables.find(t => t.name === tableName);
+      if (table) {
+        const index: SQLIndex = {
+          name: indexName,
+          columns,
+          unique: isUnique,
+          using
+        };
+        table.indexes.push(index);
+      }
+    } catch (error) {
+      console.error('Error parsing CREATE INDEX:', error);
+    }
+  }
+
+  private static parseComment(statement: string, tables: SQLTable[]): void {
+    try {
+      // Parse: COMMENT ON TABLE table_name IS 'comment text'
+      const tableCommentMatch = statement.match(
+        /COMMENT\s+ON\s+TABLE\s+(?:"([^"]+)"|(\w+))\s+IS\s+'([^']*)'/i
+      );
+
+      if (tableCommentMatch) {
+        const tableName = tableCommentMatch[1] || tableCommentMatch[2];
+        const comment = tableCommentMatch[3];
+        const table = tables.find(t => t.name === tableName);
+        if (table) {
+          table.comment = comment;
+        }
+        return;
+      }
+
+      // Parse: COMMENT ON COLUMN table_name.column_name IS 'comment text'
+      const columnCommentMatch = statement.match(
+        /COMMENT\s+ON\s+COLUMN\s+(?:"([^"]+)"|(\w+))\.(?:"([^"]+)"|(\w+))\s+IS\s+'([^']*)'/i
+      );
+
+      if (columnCommentMatch) {
+        const tableName = columnCommentMatch[1] || columnCommentMatch[2];
+        const columnName = columnCommentMatch[3] || columnCommentMatch[4];
+        const comment = columnCommentMatch[5];
+        const table = tables.find(t => t.name === tableName);
+        if (table) {
+          const column = table.columns.find(col => col.name === columnName);
+          if (column) {
+            column.comment = comment;
+          }
+        }
+      }
+    } catch (error) {
+      console.error('Error parsing COMMENT:', error);
     }
   }
 }

@@ -3,6 +3,8 @@ export interface SQLTable {
   name: string;
   columns: SQLColumn[];
   constraints: SQLConstraint[];
+  indexes: SQLIndex[];
+  comment?: string;
 }
 
 export interface SQLEnum {
@@ -19,6 +21,7 @@ export interface SQLColumn {
   isUnique: boolean;
   length?: number;
   isEnum?: boolean;
+  comment?: string;
 }
 
 export interface SQLConstraint {
@@ -28,11 +31,19 @@ export interface SQLConstraint {
   referencedColumns?: string[];
 }
 
+export interface SQLIndex {
+  name?: string;
+  columns: string[];
+  unique: boolean;
+  using?: string; // e.g., BTREE, HASH, GIN, etc.
+}
+
 // Prisma generation types
 export interface PrismaModel {
   name: string;
   fields: PrismaField[];
   attributes: string[];
+  comment?: string;
 }
 
 export interface PrismaEnum {
@@ -46,6 +57,7 @@ export interface PrismaField {
   attributes: string[];
   isOptional: boolean;
   isArray: boolean;
+  comment?: string;
 }
 
 // Parser result types
